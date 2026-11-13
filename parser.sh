@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 
+trim() {
+    local value=$1
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
 filename="$1"
 
 if [[ -z "$filename" ]]; then
@@ -13,7 +20,13 @@ if [[ ! -f "$filename" ]]; then
 fi
 
 section="default"
+line_number=0
+had_error=0
+
 while IFS= read -r line || [[ -n "$line" ]]; do
+    ((line_number += 1))
+    line="$(trim "$line")"
+
     case "$line" in
         ""|\#*|\;*) continue ;;
     esac
@@ -26,10 +39,12 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     
     if [[ "$line" =~ ^([a-zA-Z_][a-zA-Z0-9_.-]*)[[:space:]]*=(.*)$ ]]; then
         key="${BASH_REMATCH[1]}"
-        value="${BASH_REMATCH[2]}"
+        value="$(trim "${BASH_REMATCH[2]}")"
         printf '%s.%s = %s\n' "$section" "$key" "$value"
     else
-        printf 'Error: unrecognized line: %s\n' "$line" >&2
+        printf '%s:%d: error: unrecognized line: %s\n' "$filename" "$line_number" "$line" >&2
+        had_error=1
     fi
-    
 done < "$filename"
+
+exit "$had_error"
