@@ -1,4 +1,23 @@
+title = "Shakespeare"
+team = "Syndication"
+
 [server]
+host = "balcony.syndication"
 port = 1909
+
+[oreo]
+name = "Oreo Montague"
+house = "Montague"
+message = "But soft! What light through yonder window breaks?"
+
+[syndication]
+name = "Syndication"
+activity = "flag the capture"
+message = "ocean in the water"
+
+[balcony]
+message = "Parting is such sweet sorrow."
+inscription = "Poetry <3 puzzles"
+equation = "Poetry = words + rhythm"
 
 # hee hee
