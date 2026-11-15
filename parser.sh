@@ -1,15 +1,5 @@
 #!/usr/bin/env bash
 
-trim() {
-    local value=$1
-    local whitespace=$' \t'
-
-    value="${value#"${value%%[!$whitespace]*}"}"
-    value="${value%"${value##*[!$whitespace]}"}"
-
-    printf '%s' "$value"
-}
-
 encode_bytes() {
     local LC_ALL=C
     local input=$1
@@ -86,43 +76,196 @@ print_pair() {
     printf '\n'
 }
 
-parse_line() {
-    local line=$1
-    local key value key_hex
+advance_cursor() {
+    case "${document:position:1}" in
+        $'\r')
+            ((position += 2))
+            ((line_number += 1))
+            ;;
+        $'\n')
+            ((position += 1))
+            ((line_number += 1))
+            ;;
+        *)
+            ((position += 1))
+            ;;
+    esac
 
-    if [[ "$line" =~ $ignored_pattern ]]; then
-        return
+    return 0
+}
+
+skip_whitespace() {
+    while ((position < document_length)); do
+        case "${document:position:1}" in
+            ' ' | $'\t')
+                advance_cursor
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    return 0
+}
+
+skip_to_newline() {
+    while ((position < document_length)); do
+        case "${document:position:1}" in
+            $'\r' | $'\n')
+                break
+                ;;
+        esac
+
+        advance_cursor
+    done
+
+    return 0
+}
+
+parse_bare_key() {
+    local start=$position
+
+    while ((position < document_length)); do
+        case "${document:position:1}" in
+            [A-Za-z0-9_-])
+                advance_cursor
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    if ((position == start)); then
+        return 1
     fi
 
-    if [[ "$line" =~ $table_pattern ]]; then
-        encode_bytes "${BASH_REMATCH[1]}"
-        select_table "$encoded_bytes"
+    parsed_key="${document:start:position-start}"
+    return 0
+}
 
-        printf 'Section: '
-        print_bytes "${node_key[current_table]}"
-        printf '\n'
-        return
+parse_raw_value() {
+    local start=$position
+    local end=$position
+
+    while ((position < document_length)); do
+        case "${document:position:1}" in
+            $'\r' | $'\n')
+                break
+                ;;
+            ' ' | $'\t')
+                ;;
+            *)
+                end=$((position + 1))
+                ;;
+        esac
+
+        advance_cursor
+    done
+
+    if ((end == start)); then
+        report_error "missing value"
+        return 1
     fi
 
-    if [[ "$line" =~ $key_pattern ]]; then
-        key="${BASH_REMATCH[1]}"
-        value="$(trim "${BASH_REMATCH[2]}")"
+    parsed_value="${document:start:end-start}"
+    return 0
+}
 
-        if [[ -z "$value" ]]; then
-            report_error "missing value"
-            return
+parse_table_header() {
+    local parsed_key=""
+
+    advance_cursor
+    skip_whitespace
+
+    parse_bare_key || return 1
+
+    skip_whitespace
+
+    [[ "${document:position:1}" == ']' ]] || return 1
+
+    advance_cursor
+    skip_whitespace
+
+    case "${document:position:1}" in
+        "" | $'\r' | $'\n')
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    encode_bytes "$parsed_key"
+    select_table "$encoded_bytes"
+
+    printf 'Section: '
+    print_bytes "${node_key[current_table]}"
+    printf '\n'
+    return 0
+}
+
+parse_key_value() {
+    local parsed_key=""
+    local parsed_value=""
+    local key_hex
+
+    parse_bare_key || return 1
+
+    skip_whitespace
+
+    [[ "${document:position:1}" == '=' ]] || return 1
+
+    advance_cursor
+    skip_whitespace
+    parse_raw_value || return 1
+
+    encode_bytes "$parsed_key"
+    key_hex=$encoded_bytes
+
+    encode_bytes "$parsed_value"
+    add_node raw "$current_table" "$key_hex" "$encoded_bytes"
+    print_pair "$node_result"
+    return 0
+}
+
+parse_document() {
+    local start parser
+
+    while ((position < document_length)); do
+        start=$position
+        skip_whitespace
+
+        case "${document:position:1}" in
+            "")
+                break
+                ;;
+            $'\r' | $'\n')
+                advance_cursor
+                continue
+                ;;
+            '#')
+                skip_to_newline
+                continue
+                ;;
+            '[')
+                parser=parse_table_header
+                ;;
+            *)
+                parser=parse_key_value
+                ;;
+        esac
+
+        if ! "$parser"; then
+            if ((had_error == 0)); then
+                skip_to_newline
+                report_error "unrecognized line: ${document:start:position-start}"
+            fi
+            return 1
         fi
+    done
 
-        encode_bytes "$key"
-        key_hex=$encoded_bytes
-
-        encode_bytes "$value"
-        add_node raw "$current_table" "$key_hex" "$encoded_bytes"
-
-        print_pair "$node_result"
-    else
-        report_error "unrecognized line: $line"
-    fi
+    return 0
 }
 
 validate_document() {
@@ -138,7 +281,6 @@ validate_document() {
 
         if ((pending > 0)); then
             if ((byte < 0x80 || byte > 0xbf)); then
-                report_error "invalid UTF-8 continuation byte"
                 return 1
             fi
 
@@ -149,7 +291,6 @@ validate_document() {
                 if ((codepoint < minimum ||
                      codepoint > 0x10ffff ||
                      (codepoint >= 0xd800 && codepoint <= 0xdfff))); then
-                    report_error "invalid UTF-8 code point"
                     return 1
                 fi
             fi
@@ -162,13 +303,11 @@ validate_document() {
                     ;;
                 13)
                     if [[ "${document:i:2}" != $'\r\n' ]]; then
-                        report_error "carriage return must be followed by line feed"
                         return 1
                     fi
                     ;;
                 *)
                     if ((byte < 0x20 || byte == 0x7f)); then
-                        report_error "forbidden raw control character"
                         return 1
                     fi
                     ;;
@@ -186,13 +325,11 @@ validate_document() {
             codepoint=$((byte & 0x07))
             minimum=0x10000
         else
-            report_error "invalid UTF-8 leading byte"
             return 1
         fi
     done
 
     if ((pending != 0)); then
-        report_error "incomplete UTF-8 sequence"
         return 1
     fi
 
@@ -213,10 +350,8 @@ read_document() {
         return 1
     fi
 
-    validate_document || return 1
-
-    if ((read_status == 0)); then
-        report_error "raw NUL byte is not permitted"
+    if ! validate_document || ((read_status == 0)); then
+        report_error "invalid UTF-8 or raw control character"
         return 1
     fi
 
@@ -229,8 +364,8 @@ parse_file() {
     local line_number=1
     local had_error=0
     local document=""
-    local remaining=""
-    local line=""
+    local document_length=0
+    local position=0
 
     local -a node_type=(table)
     local -a node_parent=(-1)
@@ -241,34 +376,13 @@ parse_file() {
     local node_result=0
     local encoded_bytes=""
 
-    local ignored_pattern=$'^[ \t]*(#.*)?$'
-    local key_pattern=$'^[ \t]*([A-Za-z0-9_-]+)[ \t]*=(.*)$'
-    local table_pattern=$'^[ \t]*\\[[ \t]*([A-Za-z0-9_-]+)[ \t]*\\][ \t]*$'
-
     if ! read_document < "$filename"; then
         return 1
     fi
 
-    remaining=$document
-    line_number=0
-
-    while [[ -n "$remaining" ]]; do
-        ((line_number += 1))
-
-        if [[ "$remaining" == *$'\n'* ]]; then
-            line=${remaining%%$'\n'*}
-            remaining=${remaining#*$'\n'}
-
-            line=${line%$'\r'}
-        else
-            line=$remaining
-            remaining=""
-        fi
-
-        parse_line "$line"
-    done
-
-    return "$had_error"
+    document_length=${#document}
+    line_number=1
+    parse_document
 }
 
 main() {
@@ -280,7 +394,7 @@ main() {
     fi
 
     if [[ ! -f "$filename" ]]; then
-        printf 'Error: file not found: %s\n' "$filename"
+        printf 'why no file: %s\n' "$filename"
         return 1
     fi
 

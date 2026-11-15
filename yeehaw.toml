@@ -8,7 +8,10 @@ port = 1909
 [oreo]
 name = "Oreo Montague"
 house = "Montague"
-message = "But soft! What light through yonder window breaks?"
+message = """
+Oreo stands
+on the balcony.
+"""
 
 [syndication]
 name = "Syndication"
