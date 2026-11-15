@@ -14,6 +14,36 @@ encode_bytes() {
     done
 }
 
+encode_codepoint() {
+    local codepoint=$1
+
+    if ((codepoint > 0x10ffff ||
+         (codepoint >= 0xd800 && codepoint <= 0xdfff))); then
+        return 1
+    fi
+
+    if ((codepoint <= 0x7f)); then
+        printf -v encoded_bytes '%02x' "$codepoint"
+    elif ((codepoint <= 0x7ff)); then
+        printf -v encoded_bytes '%02x%02x' \
+            "$((0xc0 | (codepoint >> 6)))" \
+            "$((0x80 | (codepoint & 0x3f)))"
+    elif ((codepoint <= 0xffff)); then
+        printf -v encoded_bytes '%02x%02x%02x' \
+            "$((0xe0 | (codepoint >> 12)))" \
+            "$((0x80 | ((codepoint >> 6) & 0x3f)))" \
+            "$((0x80 | (codepoint & 0x3f)))"
+    else
+        printf -v encoded_bytes '%02x%02x%02x%02x' \
+            "$((0xf0 | (codepoint >> 18)))" \
+            "$((0x80 | ((codepoint >> 12) & 0x3f)))" \
+            "$((0x80 | ((codepoint >> 6) & 0x3f)))" \
+            "$((0x80 | (codepoint & 0x3f)))"
+    fi
+
+    return 0
+}
+
 print_bytes() {
     local hex=$1
     local i
@@ -72,7 +102,13 @@ print_pair() {
 
     print_bytes "${node_key[node]}"
     printf ' = '
-    print_bytes "${node_value[node]}"
+
+    if [[ "${node_type[node]}" == string ]]; then
+        printf '%s' "$2"
+    else
+        print_bytes "${node_value[node]}"
+    fi
+
     printf '\n'
 }
 
@@ -145,6 +181,79 @@ parse_bare_key() {
     return 0
 }
 
+parse_escape() {
+    local digits=0
+    local hex codepoint
+
+    advance_cursor
+
+    case "${document:position:1}" in
+        '"') encoded_bytes=22 ;;
+        '\') encoded_bytes=5c ;;
+        b) encoded_bytes=08 ;;
+        t) encoded_bytes=09 ;;
+        n) encoded_bytes=0a ;;
+        f) encoded_bytes=0c ;;
+        r) encoded_bytes=0d ;;
+        e) encoded_bytes=1b ;;
+        x) digits=2 ;;
+        u) digits=4 ;;
+        U) digits=8 ;;
+        *) return 1 ;;
+    esac
+
+    advance_cursor
+
+    if ((digits > 0)); then
+        hex="${document:position:digits}"
+
+        [[ ${#hex} -eq digits && "$hex" != *[!0-9a-fA-F]* ]] || return 1
+
+        codepoint=$((16#$hex))
+        encode_codepoint "$codepoint" || return 1
+        ((position += digits))
+    fi
+
+    return 0
+}
+
+parse_string() {
+    local quote="${document:position:1}"
+    local start
+
+    parsed_value=""
+    advance_cursor
+    start=$position
+
+    while ((position < document_length)); do
+        case "${document:position:1}" in
+            "$quote")
+                encode_bytes "${document:start:position-start}"
+                parsed_value+="$encoded_bytes"
+                advance_cursor
+                return 0
+                ;;
+            $'\r' | $'\n')
+                return 1
+                ;;
+            '\')
+                if [[ "$quote" == '"' ]]; then
+                    encode_bytes "${document:start:position-start}"
+                    parsed_value+="$encoded_bytes"
+                    parse_escape || return 1
+                    parsed_value+="$encoded_bytes"
+                    start=$position
+                    continue
+                fi
+                ;;
+        esac
+
+        advance_cursor
+    done
+
+    return 1
+}
+
 parse_raw_value() {
     local start=$position
     local end=$position
@@ -170,6 +279,29 @@ parse_raw_value() {
     fi
 
     parsed_value="${document:start:end-start}"
+    return 0
+}
+
+parse_value() {
+    case "${document:position:3}" in
+        '"""' | "'''")
+            return 1
+            ;;
+    esac
+
+    case "${document:position:1}" in
+        '"' | "'")
+            parsed_type=string
+            parse_string || return 1
+            ;;
+        *)
+            parsed_type=raw
+            parse_raw_value || return 1
+            encode_bytes "$parsed_value"
+            parsed_value=$encoded_bytes
+            ;;
+    esac
+
     return 0
 }
 
@@ -208,24 +340,32 @@ parse_table_header() {
 parse_key_value() {
     local parsed_key=""
     local parsed_value=""
-    local key_hex
+    local parsed_type=""
+    local value_start value_end
 
     parse_bare_key || return 1
-
     skip_whitespace
 
     [[ "${document:position:1}" == '=' ]] || return 1
 
     advance_cursor
     skip_whitespace
-    parse_raw_value || return 1
+    value_start=$position
+    parse_value || return 1
+    value_end=$position
+    skip_whitespace
+
+    case "${document:position:1}" in
+        "" | $'\r' | $'\n')
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 
     encode_bytes "$parsed_key"
-    key_hex=$encoded_bytes
-
-    encode_bytes "$parsed_value"
-    add_node raw "$current_table" "$key_hex" "$encoded_bytes"
-    print_pair "$node_result"
+    add_node "$parsed_type" "$current_table" "$encoded_bytes" "$parsed_value"
+    print_pair "$node_result" "${document:value_start:value_end-value_start}"
     return 0
 }
 
