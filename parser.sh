@@ -85,10 +85,7 @@ select_table() {
 }
 
 report_error() {
-    printf '%s:%d: error: %s\n' \
-        "$filename" "$line_number" "$1" >&2
-
-    had_error=1
+    printf '%s:%d: error: %s\n' "$filename" "$line_number" "$1"
 }
 
 print_pair() {
@@ -157,6 +154,22 @@ skip_to_newline() {
     done
 
     return 0
+}
+
+parse_statement_end() {
+    skip_whitespace
+
+    case "${document:position:1}" in
+        '#')
+            skip_to_newline
+            ;;
+        "" | $'\r' | $'\n')
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 parse_bare_key() {
@@ -256,29 +269,24 @@ parse_string() {
 
 parse_raw_value() {
     local start=$position
-    local end=$position
 
     while ((position < document_length)); do
         case "${document:position:1}" in
-            $'\r' | $'\n')
+            ' ' | $'\t' | $'\r' | $'\n' | '#')
                 break
-                ;;
-            ' ' | $'\t')
-                ;;
-            *)
-                end=$((position + 1))
                 ;;
         esac
 
         advance_cursor
     done
 
-    if ((end == start)); then
-        report_error "missing value"
+    if ((position == start)); then
+        parse_error="missing value"
         return 1
     fi
 
-    parsed_value="${document:start:end-start}"
+    encode_bytes "${document:start:position-start}"
+    parsed_value=$encoded_bytes
     return 0
 }
 
@@ -297,8 +305,6 @@ parse_value() {
         *)
             parsed_type=raw
             parse_raw_value || return 1
-            encode_bytes "$parsed_value"
-            parsed_value=$encoded_bytes
             ;;
     esac
 
@@ -318,15 +324,7 @@ parse_table_header() {
     [[ "${document:position:1}" == ']' ]] || return 1
 
     advance_cursor
-    skip_whitespace
-
-    case "${document:position:1}" in
-        "" | $'\r' | $'\n')
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    parse_statement_end || return 1
 
     encode_bytes "$parsed_key"
     select_table "$encoded_bytes"
@@ -353,15 +351,7 @@ parse_key_value() {
     value_start=$position
     parse_value || return 1
     value_end=$position
-    skip_whitespace
-
-    case "${document:position:1}" in
-        "" | $'\r' | $'\n')
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    parse_statement_end || return 1
 
     encode_bytes "$parsed_key"
     add_node "$parsed_type" "$current_table" "$encoded_bytes" "$parsed_value"
@@ -370,10 +360,10 @@ parse_key_value() {
 }
 
 parse_document() {
-    local start parser
+    local parser
+    local parse_error="invalid syntax"
 
     while ((position < document_length)); do
-        start=$position
         skip_whitespace
 
         case "${document:position:1}" in
@@ -397,10 +387,7 @@ parse_document() {
         esac
 
         if ! "$parser"; then
-            if ((had_error == 0)); then
-                skip_to_newline
-                report_error "unrecognized line: ${document:start:position-start}"
-            fi
+            report_error "$parse_error"
             return 1
         fi
     done
@@ -502,7 +489,6 @@ parse_file() {
     local LC_ALL=C
     local filename=$1
     local line_number=1
-    local had_error=0
     local document=""
     local document_length=0
     local position=0

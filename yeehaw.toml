@@ -1,22 +1,30 @@
 title = "Shakespeare"
 team = "Syndication"
 
-[server]
+[server] # server de balcony
 host = "balcony.syndication"
-port = 1909
+port = 1909 #cool number
 
 [oreo]
 name = "Oreo Montague"
 house = "Montague"
+tag = '#Oreo'
+notes = '''
+Oreo's notes stay literal.
+The path is \balcony.
+'''
 message = """
 Oreo stands
 on the balcony.
 """
+rehearsal_note = """Oreo waits \
+    for the next cue."""
 
 [syndication]
 name = "Syndication"
 activity = "flag the capture"
 message = "ocean in the water"
+tag = "#Syndication"
 
 [balcony]
 message = "Parting is such sweet sorrow."
@@ -24,3 +32,53 @@ inscription = "Poetry <3 puzzles"
 equation = "Poetry = words + rhythm"
 
 # hee hee
+
+[barca]
+win_final = true
+attendance = 62_467
+replay = 0x00_4D_98
+permissions = 0o755
+overlay_flags = 0b1101
+replay_speed = 1.0e0
+replay_adjustment = -0.0
+replay_limit = inf
+unavailable_xg = nan
+founded = 1899-11-29
+kickoff_time = 20:45
+replay_start = 2009-05-27t20:45:00.5#half a second after kickoff :O
+kickoff = 2009-05-27 20:45+02:00
+"club.nickname" = "Barça"
+broadcast.crew = "Syndication"
+
+[barca.broadcast.overlay]
+venue = "Stadio Olimpico"
+highlights = [
+    "Kickoff",
+    [10, 70],# goal minutes
+    "Full time",
+]
+scoreboard = {
+    home.name = "FC Barcelona",
+    away.name = "Manchester United",
+    score = { home = 2, away = 0 },
+}
+
+[[goals]]
+minute = 10
+
+[goals.player]
+name = "Samuel Eto'o"
+shirt = 9
+
+[[goals.replays]]
+label = "Opening goal"
+
+[[goals]]
+minute = 70
+
+[goals.player]
+name = "Lionel Messi"
+shirt = 10
+
+[[goals.replays]]
+label = "Messi's header"
