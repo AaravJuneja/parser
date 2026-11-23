@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
 encode_bytes() {
-    local LC_ALL=C
     local input=$1
     local i byte hex
 
@@ -469,15 +468,95 @@ parse_scalar() {
     return 0
 }
 
+valid_date() {
+    local date=$1
+    local year=$((10#${date:0:4}))
+    local month=$((10#${date:5:2}))
+    local day=$((10#${date:8:2}))
+    local days=31
+
+    ((month >= 1 && month <= 12)) || return 1
+
+    case "$month" in
+        2)
+            days=28
+            if ((year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))); then
+                days=29
+            fi
+            ;;
+        4 | 6 | 9 | 11)
+            days=30
+            ;;
+    esac
+
+    ((day >= 1 && day <= days))
+}
+
+parse_date_time() {
+    local date_pattern='[0-9]{4}-[0-9]{2}-[0-9]{2}'
+    local time_pattern='[0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?'
+    local offset_pattern='[Zz]|[+-][0-9]{2}:[0-9]{2}'
+    local date_time="^(${date_pattern})([Tt ](${time_pattern})(${offset_pattern})?)?"
+    local text=${document:position}
+    local token date time offset=""
+    local hour minute second=0
+    local offset_hour offset_minute
+
+    if [[ "$text" =~ $date_time ]]; then
+        token=${BASH_REMATCH[0]}
+        date=${BASH_REMATCH[1]}
+        time=${BASH_REMATCH[3]}
+        offset=${BASH_REMATCH[6]}
+        valid_date "$date" || return 1
+
+        if [[ -n "$offset" ]]; then
+            parsed_type="offset-date-time"
+        elif [[ -n "$time" ]]; then
+            parsed_type="local-date-time"
+        else
+            parsed_type="local-date"
+        fi
+    elif [[ "$text" =~ ^${time_pattern} ]]; then
+        token=${BASH_REMATCH[0]}
+        time=$token
+        parsed_type="local-time"
+    else
+        return 1
+    fi
+
+    if [[ -n "$time" ]]; then
+        hour=$((10#${time:0:2}))
+        minute=$((10#${time:3:2}))
+        if [[ "${time:5:1}" == : ]]; then
+            second=$((10#${time:6:2}))
+        fi
+        ((hour <= 23 && minute <= 59 && second <= 60)) || return 1
+    fi
+
+    if [[ "$offset" == [+-]* ]]; then
+        offset_hour=$((10#${offset:1:2}))
+        offset_minute=$((10#${offset:4:2}))
+        ((offset_hour <= 23 && offset_minute <= 59)) || return 1
+    fi
+
+    ((position += ${#token}))
+    encode_bytes "$token"
+    parsed_value=$encoded_bytes
+    return 0
+}
+
 parse_value() {
-    case "${document:position:3}" in
-        '"""' | "'''")
+    case "${document:position:5}" in
+        '"""'* | "'''"*)
             parsed_type=string
             parse_multiline_string
             ;;
         '"'* | "'"*)
             parsed_type=string
             parse_string
+            ;;
+        [0-9][0-9][0-9][0-9]- | [0-9][0-9]:*)
+            parse_date_time
             ;;
         *)
             parse_scalar
