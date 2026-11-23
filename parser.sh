@@ -202,7 +202,7 @@ parse_escape() {
 
     case "${document:position:1}" in
         '"') encoded_bytes=22 ;;
-        '\') encoded_bytes=5c ;;
+        \\) encoded_bytes=5c ;;
         b) encoded_bytes=08 ;;
         t) encoded_bytes=09 ;;
         n) encoded_bytes=0a ;;
@@ -249,7 +249,7 @@ parse_string() {
             $'\r' | $'\n')
                 return 1
                 ;;
-            '\')
+            \\)
                 if [[ "$quote" == '"' ]]; then
                     encode_bytes "${document:start:position-start}"
                     parsed_value+="$encoded_bytes"
@@ -340,7 +340,7 @@ parse_multiline_string() {
                         ;;
                 esac
                 ;;
-            '\')
+            \\)
                 if [[ "$quote" == '"' ]]; then
                     encode_bytes "${document:start:position-start}"
                     parsed_value+="$encoded_bytes"
@@ -358,8 +358,66 @@ parse_multiline_string() {
     return 1
 }
 
-parse_raw_value() {
+parse_integer() {
+    local digits=$1
+    local base=10
+    local negative=0
+    local limit=$(( (1 << 63) + 1 ))
+    local value=0
+    local i digit
+
+    case "$digits" in
+        -*)
+            negative=1
+            ((limit -= 1))
+            digits=${digits:1}
+            ;;
+        +*)
+            digits=${digits:1}
+            ;;
+        0x*)
+            base=16
+            digits=${digits:2}
+            ;;
+        0o*)
+            base=8
+            digits=${digits:2}
+            ;;
+        0b*)
+            base=2
+            digits=${digits:2}
+            ;;
+    esac
+
+    digits=${digits//_/}
+
+    for ((i = 0; i < ${#digits}; i++)); do
+        digit=$((16#${digits:i:1}))
+
+        if ((value < (limit + digit) / base)); then
+            return 1
+        fi
+
+        ((value = value * base - digit))
+    done
+
+    if ((negative == 0)); then
+        ((value = -value))
+    fi
+
+    parsed_type=integer
+    encode_bytes "$value"
+    parsed_value=$encoded_bytes
+    return 0
+}
+
+parse_scalar() {
     local start=$position
+    local token
+    local decimal='[+-]?(0|[1-9](_?[0-9])*)'
+    local digits='[0-9](_?[0-9])*'
+    local exponent="[eE][+-]?${digits}"
+    local float="^${decimal}([.]${digits}(${exponent})?|${exponent})$"
 
     while ((position < document_length)); do
         case "${document:position:1}" in
@@ -376,7 +434,37 @@ parse_raw_value() {
         return 1
     fi
 
-    encode_bytes "${document:start:position-start}"
+    token=${document:start:position-start}
+
+    case "$token" in
+        true | false)
+            parsed_type=boolean
+            ;;
+        inf | +inf | -inf)
+            parsed_type=float
+            token=${token#+}
+            ;;
+        nan | +nan | -nan)
+            parsed_type=float
+            token=nan
+            ;;
+        *)
+            if [[ "$token" =~ ^${decimal}$ ||
+                  "$token" =~ ^0x[0-9a-fA-F](_?[0-9a-fA-F])*$ ||
+                  "$token" =~ ^0o[0-7](_?[0-7])*$ ||
+                  "$token" =~ ^0b[01](_?[01])*$ ]]; then
+                parse_integer "$token"
+                return
+            fi
+
+            [[ "$token" =~ $float ]] || return 1
+            parsed_type=float
+            token=${token//_/}
+            token=${token#+}
+            ;;
+    esac
+
+    encode_bytes "$token"
     parsed_value=$encoded_bytes
     return 0
 }
@@ -392,8 +480,7 @@ parse_value() {
             parse_string
             ;;
         *)
-            parsed_type=raw
-            parse_raw_value
+            parse_scalar
             ;;
     esac
 }
