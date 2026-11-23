@@ -267,6 +267,97 @@ parse_string() {
     return 1
 }
 
+parse_multiline_escape() {
+    case "${document:position+1:1}" in
+        ' ' | $'\t' | $'\r' | $'\n')
+            ;;
+        *)
+            parse_escape
+            return
+            ;;
+    esac
+
+    advance_cursor
+    skip_whitespace
+
+    case "${document:position:1}" in
+        $'\r' | $'\n')
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    while ((position < document_length)); do
+        case "${document:position:1}" in
+            ' ' | $'\t' | $'\r' | $'\n')
+                advance_cursor
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    encoded_bytes=""
+    return 0
+}
+
+parse_multiline_string() {
+    local quote="${document:position:1}"
+    local start quote_start
+
+    parsed_value=""
+    ((position += 3))
+
+    case "${document:position:1}" in
+        $'\r' | $'\n')
+            advance_cursor
+            ;;
+    esac
+
+    start=$position
+
+    while ((position < document_length)); do
+        case "${document:position:1}" in
+            "$quote")
+                quote_start=$position
+                while [[ "${document:position:1}" == "$quote" ]]; do
+                    ((position += 1))
+                done
+
+                case $((position - quote_start)) in
+                    1 | 2)
+                        continue
+                        ;;
+                    3 | 4 | 5)
+                        encode_bytes "${document:start:position-start-3}"
+                        parsed_value+="$encoded_bytes"
+                        return 0
+                        ;;
+                    *)
+                        return 1
+                        ;;
+                esac
+                ;;
+            '\')
+                if [[ "$quote" == '"' ]]; then
+                    encode_bytes "${document:start:position-start}"
+                    parsed_value+="$encoded_bytes"
+                    parse_multiline_escape || return 1
+                    parsed_value+="$encoded_bytes"
+                    start=$position
+                    continue
+                fi
+                ;;
+        esac
+
+        advance_cursor
+    done
+
+    return 1
+}
+
 parse_raw_value() {
     local start=$position
 
@@ -293,22 +384,18 @@ parse_raw_value() {
 parse_value() {
     case "${document:position:3}" in
         '"""' | "'''")
-            return 1
-            ;;
-    esac
-
-    case "${document:position:1}" in
-        '"' | "'")
             parsed_type=string
-            parse_string || return 1
+            parse_multiline_string
+            ;;
+        '"'* | "'"*)
+            parsed_type=string
+            parse_string
             ;;
         *)
             parsed_type=raw
-            parse_raw_value || return 1
+            parse_raw_value
             ;;
     esac
-
-    return 0
 }
 
 parse_table_header() {
