@@ -6,19 +6,9 @@ permissions:
   contents: read
 
 jobs:
-  invalid-toml:
+  decoder:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Check TOML 1.1 rejection cases
-        shell: bash
-        run: |
-          decoder=$(mktemp "$RUNNER_TEMP/toml-test-decoder.XXXXXX")
-          trap 'rm -f "$decoder"' EXIT
-          cat > "$decoder" <<'BASH'
-          source ./parser.sh || exit 2
-          parse_file /dev/stdin
-          BASH
-
-          printf '%s\n' '[a.b]' '"answer" = 42' | bash "$decoder"
-          go run github.com/toml-lang/toml-test/v2/cmd/toml-test@v2.2.0 test -toml=1.1 -decoder "bash $decoder" -run 'invalid/*/*'
+      - name: Run TOML 1.1 decoder tests
+        run: go run github.com/toml-lang/toml-test/v2/cmd/toml-test@v2.2.0 test -toml=1.1 -decoder 'bash ./parser.sh --toml-test'

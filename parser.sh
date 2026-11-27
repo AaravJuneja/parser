@@ -43,15 +43,6 @@ encode_codepoint() {
     return 0
 }
 
-print_bytes() {
-    local hex=$1
-    local i
-
-    for ((i = 0; i < ${#hex}; i += 2)); do
-        printf '%b' "\\x${hex:i:2}"
-    done
-}
-
 add_node() {
     local type=$1
     local parent=$2
@@ -61,34 +52,122 @@ add_node() {
     node_result=${#node_type[@]}
 
     node_type[node_result]=$type
-    node_parent[node_result]=$parent
     node_key[node_result]=$key
     node_value[node_result]=$value
+    node_children[parent]+="$node_result "
+
+    if [[ "${node_type[parent]}" == table ]]; then
+        child_index[$parent:$key]=$node_result
+    fi
 }
 
 find_child() {
-    local parent=$1
-    local key=$2
-    local node
+    local index="$1:$2"
+    local child=${child_index[$index]:-}
 
-    for ((node = 1; node < ${#node_type[@]}; node++)); do
-        if [[ "${node_parent[node]}" == "$parent" &&
-              "${node_key[node]}" == "$key" ]]; then
-            node_result=$node
-            return 0
-        fi
-    done
-
-    return 1
+    [[ -n "$child" ]] || return 1
+    node_result=$child
 }
 
 report_error() {
     printf '%s:%d: error: %s\n' "$filename" "$line_number" "$1" >&2
 }
 
-print_value() {
+print_json_string() {
+    local hex=$1
+    local i byte
+
+    printf '"'
+    for ((i = 0; i < ${#hex}; i += 2)); do
+        byte=${hex:i:2}
+        case "$byte" in
+            08) printf '%s' '\b' ;;
+            09) printf '%s' '\t' ;;
+            0a) printf '%s' '\n' ;;
+            0c) printf '%s' '\f' ;;
+            0d) printf '%s' '\r' ;;
+            22) printf '%s' '\"' ;;
+            5c) printf '%s' "\\\\" ;;
+            0[0-9a-f] | 1[0-9a-f]) printf '\\u00%s' "$byte" ;;
+            *) printf '%b' "\\x$byte" ;;
+        esac
+    done
+    printf '"'
+}
+
+print_tagged_time() {
+    local value=$1
+    local time_start=0
+
+    if [[ "${value:4:1}" == '-' ]]; then
+        value="${value:0:10}T${value:11}"
+        time_start=11
+    fi
+
+    if [[ "${value:time_start+5:1}" != ':' ]]; then
+        value="${value:0:time_start+5}:00${value:time_start+5}"
+    fi
+
+    printf '"%s"' "${value/%z/Z}"
+}
+
+print_json_scalar() {
+    local type=$1
+    local value=$2
+    local indent=$3
+    local tag
+
+    if [[ "$output_format" == tagged ]]; then
+        local field_indent=$((indent + 2))
+
+        case "$type" in
+            boolean) tag=bool ;;
+            offset-date-time) tag=datetime ;;
+            local-date-time) tag="datetime-local" ;;
+            local-date) tag="date-local" ;;
+            local-time) tag="time-local" ;;
+            *) tag=$type ;;
+        esac
+
+        printf '{\n%*s"type": "%s",\n%*s"value": ' \
+            "$field_indent" '' "$tag" "$field_indent" ''
+        case "$tag" in
+            datetime | datetime-local | time-local)
+                print_tagged_time "$value"
+                ;;
+            string)
+                print_json_string "$value"
+                ;;
+            *)
+                printf '"%s"' "$value"
+                ;;
+        esac
+        printf '\n%*s}' "$indent" ''
+        return
+    fi
+
+    case "$type" in
+        boolean | integer | float)
+            case "$value" in
+                inf | -inf | nan) printf '"%s"' "$value" ;;
+                *) printf '%s' "$value" ;;
+            esac
+            ;;
+        string)
+            print_json_string "$value"
+            ;;
+        *)
+            printf '"%s"' "$value"
+            ;;
+    esac
+}
+
+print_json_value() {
     local node=$1
+    local indent=$2
+    local child_indent=$((indent + 2))
     local child closing separator=""
+    local -a children
 
     case "${node_type[node]}" in
         array)
@@ -100,36 +179,26 @@ print_value() {
             closing='}'
             ;;
         *)
-            print_bytes "${node_value[node]}"
+            print_json_scalar "${node_type[node]}" "${node_value[node]}" "$indent"
             return
             ;;
     esac
 
-    for ((child = node + 1; child < ${#node_type[@]}; child++)); do
-        [[ "${node_parent[child]}" == "$node" ]] || continue
+    if [[ -n "${node_children[node]:-}" ]]; then
+        IFS=' ' read -r -a children <<< "${node_children[node]}"
+        for child in "${children[@]}"; do
+            printf '%s\n%*s' "$separator" "$child_indent" ''
+            if [[ "$closing" == '}' ]]; then
+                print_json_string "${node_key[child]}"
+                printf ': '
+            fi
+            print_json_value "$child" "$child_indent"
+            separator=','
+        done
 
-        printf '%s' "$separator"
-        if [[ "$closing" == '}' ]]; then
-            print_bytes "${node_key[child]}"
-            printf ' = '
-        fi
-        print_value "$child"
-        separator=', '
-    done
-
-    printf '%s' "$closing"
-}
-
-print_pair() {
-    local node=$1
-
-    if [[ -n "$current_table_name" ]]; then
-        printf '%s.' "$current_table_name"
+        printf '\n%*s' "$indent" ''
     fi
-
-    printf '%s = ' "$2"
-    print_value "$node"
-    printf '\n'
+    printf '%s' "$closing"
 }
 
 advance_cursor() {
@@ -179,7 +248,7 @@ skip_to_newline() {
     return 0
 }
 
-skip_collection_space() {
+skip_space_and_comments() {
     while :; do
         skip_whitespace
 
@@ -447,8 +516,7 @@ parse_integer() {
     fi
 
     parsed_type=integer
-    encode_bytes "$value"
-    parsed_value=$encoded_bytes
+    parsed_value=$value
     return 0
 }
 
@@ -505,8 +573,7 @@ parse_scalar() {
             ;;
     esac
 
-    encode_bytes "$token"
-    parsed_value=$encoded_bytes
+    parsed_value=$token
     return 0
 }
 
@@ -582,8 +649,7 @@ parse_date_time() {
     fi
 
     ((position += ${#token}))
-    encode_bytes "$token"
-    parsed_value=$encoded_bytes
+    parsed_value=$token
     return 0
 }
 
@@ -612,11 +678,11 @@ parse_collection() {
     shift 2
 
     advance_cursor
-    skip_collection_space
+    skip_space_and_comments
 
     while [[ "${document:position:1}" != "$closing" ]]; do
         "$parser" "$@" || return 1
-        skip_collection_space
+        skip_space_and_comments
 
         case "${document:position:1}" in
             "$closing")
@@ -624,7 +690,7 @@ parse_collection() {
                 ;;
             ',')
                 advance_cursor
-                skip_collection_space
+                skip_space_and_comments
                 ;;
             *)
                 return 1
@@ -640,28 +706,22 @@ parse_value() {
     local key=$2
     local parsed_type=""
     local parsed_value=""
-    local value_node
 
     case "${document:position:1}" in
         '[')
             add_node array "$parent" "$key" ""
-            value_node=$node_result
-            parse_collection ']' parse_value "$value_node" "" || return 1
+            parse_collection ']' parse_value "$node_result" ""
             ;;
         '{')
             add_node table "$parent" "$key" ""
-            value_node=$node_result
-            table_origin[value_node]=inline
-            parse_collection '}' parse_key_value "$value_node" inline || return 1
+            table_origin[node_result]=inline
+            parse_collection '}' parse_key_value "$node_result" inline
             ;;
         *)
             parse_leaf_value || return 1
             add_node "$parsed_type" "$parent" "$key" "$parsed_value"
-            return 0
             ;;
     esac
-
-    node_result=$value_node
 }
 
 parse_key_path() {
@@ -685,7 +745,6 @@ parse_key_path() {
                 ;;
         esac
 
-        key_end=$position
         skip_whitespace
 
         if [[ "${document:position:1}" != '.' ]]; then
@@ -717,7 +776,7 @@ parse_key_path() {
 parse_table_header() {
     local parsed_key=""
     local closing=']'
-    local key_start key_end key_parent array_node
+    local key_parent array_node
 
     if [[ "${document:position:2}" == '[[' ]]; then
         closing=']]'
@@ -725,7 +784,6 @@ parse_table_header() {
 
     ((position += ${#closing}))
     skip_whitespace
-    key_start=$position
     parse_key_path 0 implicit || return 1
 
     [[ "${document:position:${#closing}}" == "$closing" ]] || return 1
@@ -752,15 +810,12 @@ parse_table_header() {
 
     table_origin[node_result]=header
     current_table=$node_result
-    current_table_name=${document:key_start:key_end-key_start}
-    printf 'Section: %s\n' "$current_table_name"
     return 0
 }
 
 parse_key_value() {
     local parsed_key=""
-    local key_start=$position
-    local key_end key_parent
+    local key_parent
 
     parse_key_path "$1" dotted || return 1
     [[ "${document:position:1}" == '=' ]] || return 1
@@ -775,45 +830,31 @@ parse_key_value() {
 
     if [[ "$2" == statement ]]; then
         parse_statement_end || return 1
-        print_pair "$node_result" "${document:key_start:key_end-key_start}"
     fi
     return 0
 }
 
 parse_document() {
-    local -a parser
     local parse_error="invalid syntax"
 
-    while ((position < document_length)); do
-        skip_whitespace
+    while :; do
+        skip_space_and_comments
 
         case "${document:position:1}" in
             "")
-                break
-                ;;
-            $'\r' | $'\n')
-                advance_cursor
-                continue
-                ;;
-            '#')
-                skip_to_newline
-                continue
+                return 0
                 ;;
             '[')
-                parser=(parse_table_header)
+                parse_table_header && continue
                 ;;
             *)
-                parser=(parse_key_value "$current_table" statement)
+                parse_key_value "$current_table" statement && continue
                 ;;
         esac
 
-        if ! "${parser[@]}"; then
-            report_error "$parse_error"
-            return 1
-        fi
+        report_error "$parse_error"
+        return 1
     done
-
-    return 0
 }
 
 validate_document() {
@@ -824,7 +865,7 @@ validate_document() {
 
     line_number=1
 
-    for ((i = 0; i < ${#document}; i++)); do
+    for ((i = 0; i < document_length; i++)); do
         printf -v byte '%d' "'${document:i:1}"
 
         if ((pending > 0)); then
@@ -898,6 +939,7 @@ read_document() {
         return 1
     fi
 
+    document_length=${#document}
     if ! validate_document || ((read_status == 0)); then
         report_error "invalid UTF-8 or raw control character"
         return 1
@@ -907,48 +949,64 @@ read_document() {
 }
 
 parse_file() {
+    if ((BASH_VERSINFO[0] < 4)); then
+        printf 'Bash 4 or newer is required\n' >&2
+        return 1
+    fi
+
     local LC_ALL=C
     local filename=$1
+    local output_format=${2:-plain}
     local line_number=1
     local document=""
     local document_length=0
     local position=0
 
     local -a node_type=(table)
-    local -a node_parent=(-1)
     local -a node_key=("")
     local -a node_value=("")
+    local -a node_children=()
     local -a table_origin=()
     local -a last_table_element=()
+    local -A child_index=()
 
     local current_table=0
-    local current_table_name=""
     local node_result=0
     local encoded_bytes=""
 
-    if ! read_document < "$filename"; then
+    if [[ "$filename" == '-' ]]; then
+        filename=stdin
+        read_document || return 1
+    elif ! read_document < "$filename"; then
         return 1
     fi
 
-    document_length=${#document}
     line_number=1
-    parse_document
+    parse_document || return 1
+    print_json_value 0 0 && printf '\n'
 }
 
 main() {
-    local filename="${1:-}"
-
-    if [[ -z "$filename" ]]; then
-        printf 'Usage: %s FILE\n' "$0" >&2
+    if (($# != 1)) || [[ -z "$1" ]]; then
+        printf 'Usage: %s FILE | - | --toml-test\n' "$0" >&2
         return 1
     fi
 
-    if [[ ! -f "$filename" ]]; then
-        printf 'why no file: %s\n' "$filename" >&2
-        return 1
-    fi
-
-    parse_file "$filename"
+    case "$1" in
+        --toml-test)
+            parse_file - tagged
+            ;;
+        -)
+            parse_file -
+            ;;
+        *)
+            if [[ ! -f "$1" ]]; then
+                printf 'why no file: %s\n' "$1" >&2
+                return 1
+            fi
+            parse_file "$1"
+            ;;
+    esac
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
