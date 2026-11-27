@@ -66,45 +66,35 @@ add_node() {
     node_value[node_result]=$value
 }
 
-select_table() {
-    local key=$1
+find_child() {
+    local parent=$1
+    local key=$2
     local node
 
     for ((node = 1; node < ${#node_type[@]}; node++)); do
-        if [[ "${node_type[node]}" == table &&
-              "${node_parent[node]}" == 0 &&
+        if [[ "${node_parent[node]}" == "$parent" &&
               "${node_key[node]}" == "$key" ]]; then
-            current_table=$node
-            return
+            node_result=$node
+            return 0
         fi
     done
 
-    add_node table 0 "$key" ""
-    current_table=$node_result
+    return 1
 }
 
 report_error() {
-    printf '%s:%d: error: %s\n' "$filename" "$line_number" "$1"
+    printf '%s:%d: error: %s\n' "$filename" "$line_number" "$1" >&2
 }
 
 print_pair() {
     local node=$1
-    local parent=${node_parent[node]}
 
-    if ((parent != 0)); then
-        print_bytes "${node_key[parent]}"
-        printf '.'
+    if [[ -n "$current_table_name" ]]; then
+        printf '%s.' "$current_table_name"
     fi
 
-    print_bytes "${node_key[node]}"
-    printf ' = '
-
-    if [[ "${node_type[node]}" == string ]]; then
-        printf '%s' "$2"
-    else
-        print_bytes "${node_value[node]}"
-    fi
-
+    printf '%s = ' "$2"
+    print_bytes "${node_value[node]}"
     printf '\n'
 }
 
@@ -564,27 +554,78 @@ parse_value() {
     esac
 }
 
+parse_key_path() {
+    local parent=$1
+    local origin=$2
+    local parsed_value=""
+
+    while :; do
+        case "${document:position:3}" in
+            '"""' | "'''")
+                return 1
+                ;;
+            '"'* | "'"*)
+                parse_string || return 1
+                parsed_key=$parsed_value
+                ;;
+            *)
+                parse_bare_key || return 1
+                encode_bytes "$parsed_key"
+                parsed_key=$encoded_bytes
+                ;;
+        esac
+
+        key_end=$position
+        skip_whitespace
+
+        if [[ "${document:position:1}" != '.' ]]; then
+            key_parent=$parent
+            return 0
+        fi
+
+        if find_child "$parent" "$parsed_key"; then
+            [[ "${node_type[node_result]}" == table ]] || return 1
+
+            if [[ "$origin" == dotted ]]; then
+                [[ "${table_origin[node_result]}" != header ]] || return 1
+                table_origin[node_result]=dotted
+            fi
+        else
+            add_node table "$parent" "$parsed_key" ""
+            table_origin[node_result]=$origin
+        fi
+
+        parent=$node_result
+        advance_cursor
+        skip_whitespace
+    done
+}
+
 parse_table_header() {
     local parsed_key=""
+    local key_start key_end key_parent
 
     advance_cursor
     skip_whitespace
-
-    parse_bare_key || return 1
-
-    skip_whitespace
+    key_start=$position
+    parse_key_path 0 implicit || return 1
 
     [[ "${document:position:1}" == ']' ]] || return 1
 
     advance_cursor
     parse_statement_end || return 1
 
-    encode_bytes "$parsed_key"
-    select_table "$encoded_bytes"
+    if find_child "$key_parent" "$parsed_key"; then
+        [[ "${node_type[node_result]}" == table &&
+           "${table_origin[node_result]}" == implicit ]] || return 1
+    else
+        add_node table "$key_parent" "$parsed_key" ""
+    fi
 
-    printf 'Section: '
-    print_bytes "${node_key[current_table]}"
-    printf '\n'
+    table_origin[node_result]=header
+    current_table=$node_result
+    current_table_name=${document:key_start:key_end-key_start}
+    printf 'Section: %s\n' "$current_table_name"
     return 0
 }
 
@@ -592,23 +633,23 @@ parse_key_value() {
     local parsed_key=""
     local parsed_value=""
     local parsed_type=""
-    local value_start value_end
+    local key_start=$position
+    local key_end key_parent
 
-    parse_bare_key || return 1
-    skip_whitespace
-
+    parse_key_path "$current_table" dotted || return 1
     [[ "${document:position:1}" == '=' ]] || return 1
+
+    if find_child "$key_parent" "$parsed_key"; then
+        return 1
+    fi
 
     advance_cursor
     skip_whitespace
-    value_start=$position
     parse_value || return 1
-    value_end=$position
     parse_statement_end || return 1
 
-    encode_bytes "$parsed_key"
-    add_node "$parsed_type" "$current_table" "$encoded_bytes" "$parsed_value"
-    print_pair "$node_result" "${document:value_start:value_end-value_start}"
+    add_node "$parsed_type" "$key_parent" "$parsed_key" "$parsed_value"
+    print_pair "$node_result" "${document:key_start:key_end-key_start}"
     return 0
 }
 
@@ -750,8 +791,10 @@ parse_file() {
     local -a node_parent=(-1)
     local -a node_key=("")
     local -a node_value=("")
+    local -a table_origin=()
 
     local current_table=0
+    local current_table_name=""
     local node_result=0
     local encoded_bytes=""
 
@@ -768,16 +811,18 @@ main() {
     local filename="${1:-}"
 
     if [[ -z "$filename" ]]; then
-        printf 'Usage: %s FILE\n' "$0"
+        printf 'Usage: %s FILE\n' "$0" >&2
         return 1
     fi
 
     if [[ ! -f "$filename" ]]; then
-        printf 'why no file: %s\n' "$filename"
+        printf 'why no file: %s\n' "$filename" >&2
         return 1
     fi
 
     parse_file "$filename"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
