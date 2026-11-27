@@ -86,6 +86,40 @@ report_error() {
     printf '%s:%d: error: %s\n' "$filename" "$line_number" "$1" >&2
 }
 
+print_value() {
+    local node=$1
+    local child closing separator=""
+
+    case "${node_type[node]}" in
+        array)
+            printf '['
+            closing=']'
+            ;;
+        table)
+            printf '{'
+            closing='}'
+            ;;
+        *)
+            print_bytes "${node_value[node]}"
+            return
+            ;;
+    esac
+
+    for ((child = node + 1; child < ${#node_type[@]}; child++)); do
+        [[ "${node_parent[child]}" == "$node" ]] || continue
+
+        printf '%s' "$separator"
+        if [[ "$closing" == '}' ]]; then
+            print_bytes "${node_key[child]}"
+            printf ' = '
+        fi
+        print_value "$child"
+        separator=', '
+    done
+
+    printf '%s' "$closing"
+}
+
 print_pair() {
     local node=$1
 
@@ -94,7 +128,7 @@ print_pair() {
     fi
 
     printf '%s = ' "$2"
-    print_bytes "${node_value[node]}"
+    print_value "$node"
     printf '\n'
 }
 
@@ -143,6 +177,24 @@ skip_to_newline() {
     done
 
     return 0
+}
+
+skip_collection_space() {
+    while :; do
+        skip_whitespace
+
+        case "${document:position:1}" in
+            '#')
+                skip_to_newline
+                ;;
+            $'\r' | $'\n')
+                advance_cursor
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    done
 }
 
 parse_statement_end() {
@@ -410,7 +462,7 @@ parse_scalar() {
 
     while ((position < document_length)); do
         case "${document:position:1}" in
-            ' ' | $'\t' | $'\r' | $'\n' | '#')
+            ' ' | $'\t' | $'\r' | $'\n' | '#' | ',' | ']' | '}')
                 break
                 ;;
         esac
@@ -535,7 +587,7 @@ parse_date_time() {
     return 0
 }
 
-parse_value() {
+parse_leaf_value() {
     case "${document:position:5}" in
         '"""'* | "'''"*)
             parsed_type=string
@@ -552,6 +604,64 @@ parse_value() {
             parse_scalar
             ;;
     esac
+}
+
+parse_collection() {
+    local closing=$1
+    local parser=$2
+    shift 2
+
+    advance_cursor
+    skip_collection_space
+
+    while [[ "${document:position:1}" != "$closing" ]]; do
+        "$parser" "$@" || return 1
+        skip_collection_space
+
+        case "${document:position:1}" in
+            "$closing")
+                break
+                ;;
+            ',')
+                advance_cursor
+                skip_collection_space
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+
+    advance_cursor
+}
+
+parse_value() {
+    local parent=$1
+    local key=$2
+    local parsed_type=""
+    local parsed_value=""
+    local value_node
+
+    case "${document:position:1}" in
+        '[')
+            add_node array "$parent" "$key" ""
+            value_node=$node_result
+            parse_collection ']' parse_value "$value_node" "" || return 1
+            ;;
+        '{')
+            add_node table "$parent" "$key" ""
+            value_node=$node_result
+            table_origin[value_node]=inline
+            parse_collection '}' parse_key_value "$value_node" inline || return 1
+            ;;
+        *)
+            parse_leaf_value || return 1
+            add_node "$parsed_type" "$parent" "$key" "$parsed_value"
+            return 0
+            ;;
+    esac
+
+    node_result=$value_node
 }
 
 parse_key_path() {
@@ -584,7 +694,8 @@ parse_key_path() {
         fi
 
         if find_child "$parent" "$parsed_key"; then
-            [[ "${node_type[node_result]}" == table ]] || return 1
+            [[ "${node_type[node_result]}" == table &&
+               "${table_origin[node_result]}" != inline ]] || return 1
 
             if [[ "$origin" == dotted ]]; then
                 [[ "${table_origin[node_result]}" != header ]] || return 1
@@ -631,12 +742,10 @@ parse_table_header() {
 
 parse_key_value() {
     local parsed_key=""
-    local parsed_value=""
-    local parsed_type=""
     local key_start=$position
     local key_end key_parent
 
-    parse_key_path "$current_table" dotted || return 1
+    parse_key_path "$1" dotted || return 1
     [[ "${document:position:1}" == '=' ]] || return 1
 
     if find_child "$key_parent" "$parsed_key"; then
@@ -645,16 +754,17 @@ parse_key_value() {
 
     advance_cursor
     skip_whitespace
-    parse_value || return 1
-    parse_statement_end || return 1
+    parse_value "$key_parent" "$parsed_key" || return 1
 
-    add_node "$parsed_type" "$key_parent" "$parsed_key" "$parsed_value"
-    print_pair "$node_result" "${document:key_start:key_end-key_start}"
+    if [[ "$2" == statement ]]; then
+        parse_statement_end || return 1
+        print_pair "$node_result" "${document:key_start:key_end-key_start}"
+    fi
     return 0
 }
 
 parse_document() {
-    local parser
+    local -a parser
     local parse_error="invalid syntax"
 
     while ((position < document_length)); do
@@ -673,14 +783,14 @@ parse_document() {
                 continue
                 ;;
             '[')
-                parser=parse_table_header
+                parser=(parse_table_header)
                 ;;
             *)
-                parser=parse_key_value
+                parser=(parse_key_value "$current_table" statement)
                 ;;
         esac
 
-        if ! "$parser"; then
+        if ! "${parser[@]}"; then
             report_error "$parse_error"
             return 1
         fi
