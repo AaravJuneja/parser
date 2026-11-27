@@ -693,7 +693,12 @@ parse_key_path() {
             return 0
         fi
 
-        if find_child "$parent" "$parsed_key"; then
+        if ! find_child "$parent" "$parsed_key"; then
+            add_node table "$parent" "$parsed_key" ""
+            table_origin[node_result]=$origin
+        elif [[ "$origin" == implicit && -n "${last_table_element[node_result]:-}" ]]; then
+            node_result=${last_table_element[node_result]}
+        else
             [[ "${node_type[node_result]}" == table &&
                "${table_origin[node_result]}" != inline ]] || return 1
 
@@ -701,9 +706,6 @@ parse_key_path() {
                 [[ "${table_origin[node_result]}" != header ]] || return 1
                 table_origin[node_result]=dotted
             fi
-        else
-            add_node table "$parent" "$parsed_key" ""
-            table_origin[node_result]=$origin
         fi
 
         parent=$node_result
@@ -714,19 +716,34 @@ parse_key_path() {
 
 parse_table_header() {
     local parsed_key=""
-    local key_start key_end key_parent
+    local closing=']'
+    local key_start key_end key_parent array_node
 
-    advance_cursor
+    if [[ "${document:position:2}" == '[[' ]]; then
+        closing=']]'
+    fi
+
+    ((position += ${#closing}))
     skip_whitespace
     key_start=$position
     parse_key_path 0 implicit || return 1
 
-    [[ "${document:position:1}" == ']' ]] || return 1
+    [[ "${document:position:${#closing}}" == "$closing" ]] || return 1
 
-    advance_cursor
+    ((position += ${#closing}))
     parse_statement_end || return 1
 
-    if find_child "$key_parent" "$parsed_key"; then
+    if [[ "$closing" == ']]' ]]; then
+        if find_child "$key_parent" "$parsed_key"; then
+            [[ -n "${last_table_element[node_result]:-}" ]] || return 1
+        else
+            add_node array "$key_parent" "$parsed_key" ""
+        fi
+
+        array_node=$node_result
+        add_node table "$array_node" "" ""
+        last_table_element[array_node]=$node_result
+    elif find_child "$key_parent" "$parsed_key"; then
         [[ "${node_type[node_result]}" == table &&
            "${table_origin[node_result]}" == implicit ]] || return 1
     else
@@ -902,6 +919,7 @@ parse_file() {
     local -a node_key=("")
     local -a node_value=("")
     local -a table_origin=()
+    local -a last_table_element=()
 
     local current_table=0
     local current_table_name=""
